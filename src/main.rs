@@ -1,21 +1,18 @@
-use std::process::Command;
-use actix_web::{web, App, HttpResponse, HttpServer};
 use actix_web::http::Error;
+use actix_web::{web, App, HttpResponse, HttpServer};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PhysicalVolume {
     name: String,
-    vg_name: String,
-    size_gb: f64,
-    free_gb: f64,
-    used_percent: f64,
+    value: String,
 }
 
 fn get_physical_volumes() -> Result<Vec<PhysicalVolume>, String> {
-    let output = Command::new("pvs")
+    let output = Command::new("sudo")
         .args(&[
+            "pvs",//command
             "--noheadings",
             "--units",
             "g",
@@ -23,7 +20,7 @@ fn get_physical_volumes() -> Result<Vec<PhysicalVolume>, String> {
             "--separator",
             ",",
             "--options",
-            "pv_name,vg_name,pv_size,pv_free",
+            "pv_name,vg_name,pv_size,pv_missing",
         ])
         .output()
         .map_err(|e| format!("Failed to execute pvs: {}", e))?;
@@ -32,7 +29,7 @@ fn get_physical_volumes() -> Result<Vec<PhysicalVolume>, String> {
         return Err(format!("pvs command failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    let stdout = str::from_utf8(&output.stdout).map_err(|e| format!("Failed to parse pvs output: {}", e))?;
+    let stdout = std::str::from_utf8(&output.stdout).map_err(|e| format!("Failed to parse pvs output: {}", e))?;
 
     let pvs = stdout
         .lines()
@@ -40,12 +37,24 @@ fn get_physical_volumes() -> Result<Vec<PhysicalVolume>, String> {
         .filter_map(|line| {
             let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
             if parts.len() >= 4 {
+                let health = {
+                    if parts[3].is_empty() {
+                        "ok"
+                    } else {
+                        "failed"
+                    }
+                };
+                let size = {
+                    let size = parts[2].parse::<f64>().unwrap_or(0.0) as u32;
+                    if size == 0 {
+                        "".to_string()
+                    } else {
+                        size.to_string()
+                    }
+                };
                 Some(PhysicalVolume {
                     name: parts[0].to_string(),
-                    vg_name: parts[1].to_string(),
-                    size_gb: parts[2].parse::<f64>().unwrap_or(f64::NAN),
-                    free_gb: parts[3].parse::<f64>().unwrap_or(f64::NAN),
-                    used_percent: (parts[2].parse::<f64>().unwrap_or(f64::NAN) - parts[3].parse::<f64>().unwrap_or(f64::NAN)) / parts[2].parse::<f64>().unwrap_or(f64::NAN) * 100.0,
+                    value: format!("{}, {}g, {}", parts[1], size, health),
                 })
             } else {
                 None
@@ -59,16 +68,13 @@ fn get_physical_volumes() -> Result<Vec<PhysicalVolume>, String> {
 #[derive(Debug, Serialize, Deserialize)]
 struct VolumeGroup {
     name: String,
-    pv_count: u32,
-    lv_count: u32,
-    size_gb: f64,
-    free_gb: f64,
-    used_percent: f64,
+    value: String,
 }
 
 fn get_volume_groups() -> Result<Vec<VolumeGroup>, String> {
-    let output = Command::new("vgs")
+    let output = Command::new("sudo")
         .args(&[
+            "vgs",//command
             "--noheadings",
             "--units",
             "g",
@@ -76,7 +82,7 @@ fn get_volume_groups() -> Result<Vec<VolumeGroup>, String> {
             "--separator",
             ",",
             "--options",
-            "vg_name,pv_count,lv_count,vg_size,vg_free",
+            "vg_name,pv_count,vg_missing_pv_count,vg_size",
         ])
         .output()
         .map_err(|e| format!("Failed to execute vgs: {}", e))?;
@@ -85,7 +91,7 @@ fn get_volume_groups() -> Result<Vec<VolumeGroup>, String> {
         return Err(format!("vgs command failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    let stdout = str::from_utf8(&output.stdout)
+    let stdout = std::str::from_utf8(&output.stdout)
         .map_err(|e| format!("Failed to parse vgs output: {}", e))?;
 
     let vgs = stdout
@@ -93,14 +99,25 @@ fn get_volume_groups() -> Result<Vec<VolumeGroup>, String> {
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| {
             let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-            if parts.len() >= 5 {
+            if parts.len() >= 4 {
+                let health = {
+                    if parts[2] == "0" {
+                        "ok".to_string()
+                    } else {
+                        format!("failed({}/{})", parts[2], parts[1])
+                    }
+                };
+                let size = {
+                    let size = parts[3].parse::<f64>().unwrap_or(0.0) as u32;
+                    if size == 0 {
+                        "".to_string()
+                    } else {
+                        size.to_string()
+                    }
+                };
                 Some(VolumeGroup {
                     name: parts[0].to_string(),
-                    pv_count: parts[1].parse::<u32>().unwrap_or(u32::MAX),
-                    lv_count: parts[2].parse::<u32>().unwrap_or(u32::MAX),
-                    size_gb: parts[3].parse::<f64>().unwrap_or(f64::NAN),
-                    free_gb: parts[4].parse::<f64>().unwrap_or(f64::NAN),
-                    used_percent: (parts[3].parse::<f64>().unwrap_or(f64::NAN) - parts[4].parse::<f64>().unwrap_or(f64::NAN)) / parts[3].parse::<f64>().unwrap_or(f64::NAN) * 100.0,
+                    value: format!("{}g, {}", size, health),
                 })
             } else {
                 None
@@ -114,15 +131,13 @@ fn get_volume_groups() -> Result<Vec<VolumeGroup>, String> {
 #[derive(Debug, Serialize, Deserialize)]
 struct LogicalVolume {
     name: String,
-    vg_name: String,
-    size_gb: f64,
-    path: String,
-    active: bool,
+    value: String,
 }
 
 fn get_logical_volumes() -> Result<Vec<LogicalVolume>, String> {
-    let output = Command::new("lvs")
+    let output = Command::new("sudo")
         .args(&[
+            "lvs",//command
             "--noheadings",
             "--units",
             "g",
@@ -130,7 +145,7 @@ fn get_logical_volumes() -> Result<Vec<LogicalVolume>, String> {
             "--separator",
             ",",
             "--options",
-            "lv_name,lv_size,lv_attr,vg_name",
+            "lv_full_name,lv_size,lv_active,lv_health_status",
         ])
         .output()
         .map_err(|e| format!("Failed to execute lvs: {}", e))?;
@@ -139,7 +154,7 @@ fn get_logical_volumes() -> Result<Vec<LogicalVolume>, String> {
         return Err(format!("lvs command failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    let stdout = str::from_utf8(&output.stdout)
+    let stdout = std::str::from_utf8(&output.stdout)
         .map_err(|e| format!("Failed to parse lvs output: {}", e))?;
 
     let lvs = stdout
@@ -147,13 +162,22 @@ fn get_logical_volumes() -> Result<Vec<LogicalVolume>, String> {
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| {
             let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-            if parts.len() >= 5 {
+            if parts.len() >= 4 {
+                let mut health = parts[3];
+                if health.is_empty() {
+                    health = "ok";
+                }
+                let size = {
+                    let size = parts[1].parse::<f64>().unwrap_or(0.0) as u32;
+                    if size == 0 {
+                        "".to_string()
+                    } else {
+                        size.to_string()
+                    }
+                };
                 Some(LogicalVolume {
                     name: parts[0].to_string(),
-                    vg_name: parts[1].to_string(),
-                    size_gb: parts[2].parse::<f64>().unwrap_or(f64::NAN),
-                    path: parts[3].to_string(),
-                    active: parts[4] == "active",
+                    value: format!("{}g, {}, {}", size, parts[2], health),
                 })
             } else {
                 None
@@ -164,28 +188,38 @@ fn get_logical_volumes() -> Result<Vec<LogicalVolume>, String> {
     Ok(lvs)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct LvmStatus {
-    physical_volumes: Vec<PhysicalVolume>,
-    volume_groups: Vec<VolumeGroup>,
-    logical_volumes: Vec<LogicalVolume>,
+async fn lvs_route() -> Result<HttpResponse, Error> {
+    match get_logical_volumes() {
+        Ok(lvs) => {
+            Ok(HttpResponse::Ok().json(lvs))
+        }
+        Err(e) => {
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": e
+            })))
+        }
+    }
 }
 
-async fn lvm_status() -> Result<HttpResponse, Error> {
-    match (
-        get_physical_volumes(),
-        get_volume_groups(),
-        get_logical_volumes(),
-    ) {
-        (Ok(pvs), Ok(vgs), Ok(lvs)) => {
-            let status = LvmStatus {
-                physical_volumes: pvs,
-                volume_groups: vgs,
-                logical_volumes: lvs,
-            };
-            Ok(HttpResponse::Ok().json(status))
+async fn vgs_route() -> Result<HttpResponse, Error> {
+    match get_volume_groups() {
+        Ok(vgs) => {
+            Ok(HttpResponse::Ok().json(vgs))
         }
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+        Err(e) => {
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": e
+            })))
+        }
+    }
+}
+
+async fn pvs_route() -> Result<HttpResponse, Error> {
+    match get_physical_volumes() {
+        Ok(pvs) => {
+            Ok(HttpResponse::Ok().json(pvs))
+        }
+        Err(e) => {
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": e
             })))
@@ -195,11 +229,16 @@ async fn lvm_status() -> Result<HttpResponse, Error> {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "9000".to_string());
+
     HttpServer::new(|| {
         App::new()
-            .route("/lvm", web::get().to(lvm_status))
+            .route("/lvs", web::get().to(lvs_route))
+            .route("/vgs", web::get().to(vgs_route))
+            .route("/pvs", web::get().to(pvs_route))
     })
-        .bind("127.0.0.1:9000")?
+        .bind(format!("{}:{}", host, port))?
         .run()
         .await
 }
