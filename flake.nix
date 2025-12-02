@@ -1,5 +1,5 @@
 {
-  description = "A Nix flake wrapping the existing default.nix";
+  description = "A systemd service for displaying basic LVM stats in Homepage";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
